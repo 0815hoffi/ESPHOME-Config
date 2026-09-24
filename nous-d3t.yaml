@@ -1,0 +1,427 @@
+substitutions:
+  device_name: "nous-d3t"
+  friendly_name: "NOUS D3T"
+  device_description: "NOUS D3T Smart Switch with Energy Monitoring"
+  fssid: NousD3THotspot
+  
+  # Pin Configuration - Standard for NOUS D3T hardware
+  uart_tx_pin: GPIO14
+  uart_rx_pin: GPIO13
+  relay_on_pin: GPIO2
+  relay_off_pin: GPIO12
+  button_pin: GPIO0
+  red_led_pin: GPIO5
+  status_led_pin: GPIO15
+  temp_sensor_pin: GPIO34
+
+  # BL0942 calibration data - DEVICE SPECIFIC
+  # These values should be calibrated for each individual device
+  # Default values provided, but should be tuned for accuracy
+  voltage_calibration: "15889.0"
+  current_calibration: "134405.9"
+
+# ============================================
+# GLOBAL VARIABLES
+# ============================================
+
+globals:
+  - id: switch_last_state
+    type: bool
+    initial_value: 'false'
+    restore_value: True
+
+  # At boot the physical position of the latching relay is unknown, so the
+  # first command must always be executed. After that, redundant commands
+  # can safely be ignored.
+  - id: relay_state_applied
+    type: bool
+    initial_value: 'false'
+    restore_value: False
+
+# ============================================
+# BASIC CONFIGURATION
+# ============================================
+
+esphome:
+  name: "${device_name}"
+  friendly_name: "${friendly_name}"
+  comment: "${device_description}"
+  project:
+    name: "nous.d3t-25a"
+    version: "2.0.0"
+  on_boot:
+    # priority -100 => runs after the template switches have restored their
+    # state from flash (default 600 = DATA, which is too early)
+    priority: -100
+    then:
+      # Let the relay coil supply charge up; without this the boot pulse is
+      # too weak and the contact does not actually switch.
+      - delay: 1s
+      # Drive the main_relay entity rather than the scripts directly, so the
+      # entity state cannot drift out of sync with the physical relay.
+      - if:
+          condition:
+            lambda: 'return id(remember_last_state).state && id(switch_last_state);'
+          then:
+            - switch.turn_on: main_relay
+          else:
+            - switch.turn_off: main_relay
+
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+
+# Write preferences to flash immediately. With the 1min default, a state
+# change followed by a power cut within that minute was lost.
+# Note: 0s is mentioned in the docs but rejected by the schema (1ms minimum);
+# "never" disables automatic writes altogether, it does not disable throttling.
+preferences:
+  flash_write_interval: 1ms
+
+
+# ============================================
+# CONNECTIVITY
+# ============================================
+
+logger:
+  level: DEBUG 
+  baud_rate: 0  # Disable UART logging to avoid conflicts
+  logs:
+    sensor: ERROR
+    binary_sensor: ERROR
+    component: ERROR
+    ntc: ERROR
+    resistance: ERROR
+
+api:
+  # 30s caused a reboot loop whenever Home Assistant was unreachable
+  reboot_timeout: 15min
+    
+
+ota:
+  - platform: esphome
+
+wifi:
+  ap:
+    ssid: ${fssid}
+
+captive_portal:
+  
+# Web server for configuration and monitoring
+web_server:
+  port: 80
+  log: True
+  version: 3  
+
+# ============================================
+# ENERGY MONITORING (BL0942)
+# ============================================
+
+uart:
+  tx_pin: ${uart_tx_pin}
+  rx_pin: ${uart_rx_pin}
+  id: uart_bl
+  data_bits: 8
+  baud_rate: 4800
+  stop_bits: 1
+  parity: NONE
+
+sensor:
+  # BL0942 Energy Monitor - Fast reading (1s) for quick protections
+  - platform: bl0942
+    update_interval: 1s
+    uart_id: uart_bl
+
+    voltage_reference: ${voltage_calibration}
+    current_reference: ${current_calibration}
+
+    voltage:
+      name: "Voltage"
+      id: voltage_sensor
+      icon: "mdi:sine-wave"
+      unit_of_measurement: V
+      accuracy_decimals: 1
+      device_class: voltage
+      state_class: measurement
+  
+    current:
+      name: "Current"
+      id: current_sensor
+      icon: "mdi:current-ac"
+      unit_of_measurement: A
+      accuracy_decimals: 2
+      device_class: current
+      state_class: measurement
+  
+    power:
+      name: "Power"
+      id: power_sensor
+      icon: "mdi:flash-outline"
+      unit_of_measurement: W
+      accuracy_decimals: 0
+      device_class: power
+      state_class: measurement
+      filters:
+        - lambda: |-
+            return abs(x);        
+
+  # ============================================
+  # TEMPERATURE MONITORING (NTC)
+  # ============================================
+
+  - platform: adc
+    id: temp_analog_reading
+    pin: ${temp_sensor_pin}
+    attenuation: 12db
+    update_interval: 5s
+    internal: true
+
+  - platform: resistance
+    id: temp_resistance_reading
+    sensor: temp_analog_reading
+    configuration: DOWNSTREAM
+    resistor: 5.6kOhm
+    internal: true
+
+  - platform: ntc
+    sensor: temp_resistance_reading
+    name: Interne Temperatur
+    id: internal_temperature
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    icon: mdi:thermometer
+    entity_category: diagnostic
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    filters:
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 2
+
+  # ============================================
+  # SYSTEM MONITORING
+  # ============================================
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    icon: "mdi:signal-variant"
+    update_interval: 60s
+    entity_category: diagnostic
+
+
+# ============================================
+# TEXT SENSORS
+# ============================================
+
+text_sensor:
+
+  - platform: uptime
+    name: "Laufzeit"
+    id: uptime_sensor
+    icon: "mdi:clipboard-text-clock-outline"
+    entity_category: diagnostic    
+    format:
+      separator: " "
+      expand: true  
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP Addresse"
+      icon: "mdi:ip-network-outline"      
+      entity_category: diagnostic
+    ssid:
+      name: "WLAN SSID"
+      icon: "mdi:wifi-settings"
+      entity_category: diagnostic
+    mac_address:
+      name: "MAC Addresse"
+      entity_category: diagnostic
+      icon: "mdi:wifi-settings"
+
+  - platform: version
+    name: "ESP-Home Version"
+    entity_category: diagnostic
+    hide_hash: true
+    hide_timestamp: true
+
+# ============================================
+# OUTPUTS & LIGHTS
+# ============================================
+
+output:
+  - platform: gpio
+    id: relay_1
+    pin: 
+      number: ${relay_on_pin}
+      ignore_strapping_warning: true
+
+  - platform: gpio
+    id: relay_2
+    pin: 
+      number: ${relay_off_pin}
+      ignore_strapping_warning: true      
+
+  - platform: gpio
+    id: red_led
+    pin:
+      number: ${red_led_pin}
+      inverted: true
+      ignore_strapping_warning: true
+
+light:
+  - platform: binary
+    output: red_led
+    id: red_light_led
+    internal: true
+
+  - platform: status_led
+    name: "Status LED"
+    id: led_status
+    pin:
+      number: ${status_led_pin}
+      inverted: true
+      ignore_strapping_warning: true
+    entity_category: config
+    internal: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+# ============================================
+# SCRIPTS
+# ============================================
+# Two separate scripts (each mode: single) could run concurrently at boot,
+# interleaving the H-bridge sequences and clobbering switch_last_state.
+# Merged into a single script with mode: restart.
+script:
+  - id: apply_relay
+    mode: restart
+    parameters:
+      state: bool
+    then:
+      # The protections call switch.turn_off on every reading (1/s) for as long
+      # as the condition holds. With mode: restart each call aborts the previous
+      # sequence before "output.turn_off: relay_1", leaving the coil energised
+      # continuously. Bail out early when the requested state is already current.
+      - if:
+          condition:
+            lambda: 'return id(relay_state_applied) && state == id(switch_last_state);'
+          then:
+            - logger.log:
+                format: "Relay already in requested state - command ignored"
+                level: DEBUG
+          else:
+            - lambda: 'id(relay_state_applied) = true;'
+            - if:
+                condition:
+                  lambda: 'return state;'
+                then:
+                  - output.turn_off: relay_1
+                  - delay: 50ms
+                  - output.turn_on: relay_2
+                  - delay: 200ms
+                  - output.turn_off: relay_2
+                  - light.turn_on: red_light_led
+                  - logger.log: "Relay turned ON"
+                  - lambda: 'id(switch_last_state)=true;'
+                  # sync explicit: o iteratie de loop, apoi flush in NVS
+                else:
+                  - output.turn_on: relay_1
+                  - delay: 50ms
+                  - output.turn_off: relay_2
+                  - light.turn_off: red_light_led
+                  - delay: 200ms
+                  - output.turn_off: relay_1
+                  - logger.log: "Relay turned OFF"
+                  - lambda: 'id(switch_last_state)=false;'
+                  # sync explicit: o iteratie de loop, apoi flush in NVS
+
+# ============================================
+# SWITCHES
+# ============================================
+
+switch:
+  - platform: template
+    id: "remember_last_state"
+    name: "letzten Zustand merken"
+    device_class: switch
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: template
+    name: "Schalter"
+    id: main_relay
+    icon: "mdi:power"
+    device_class: switch
+    # RESTORE_DEFAULT_OFF called write_state() during setup (priority ~600),
+    # firing the OFF sequence before on_boot ran. on_boot is now the single
+    # authority over the initial state.
+    restore_mode: DISABLED
+    optimistic: true
+    
+    turn_on_action:
+      - script.execute:
+          id: apply_relay
+          state: true
+      
+    turn_off_action:
+      - script.execute:
+          id: apply_relay
+          state: false
+
+# ============================================
+# BUTTONS
+# ============================================
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: restart_button
+    icon: "mdi:restart"
+    entity_category: diagnostic
+
+  - platform: factory_reset
+    name: "Factory Reset"
+    id: factory_reset_target
+    disabled_by_default: true
+    internal: true
+
+# ============================================
+# PHYSICAL BUTTON
+# ============================================
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: ${button_pin}
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    id: physical_button
+    name: "Button"
+    internal: true
+    entity_category: diagnostic
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: main_relay
+    on_click:
+      - min_length: 8s
+        max_length: 15s
+        then:
+          - logger.log: Button für 8s bis 15 Sekunden gedrückt. Starte Factory Reset...
+          - button.press: factory_reset_target
+

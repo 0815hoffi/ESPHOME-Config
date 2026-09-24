@@ -1,0 +1,184 @@
+substitutions:
+  name: steckdose2
+  friendly_name: Steckdose2
+  fssid: APSteckdose2
+  current_resistor: "0.00107"
+  voltage_divider: "769.598"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  
+bk72xx:
+  board: generic-bk7238
+
+logger:
+  level: INFO
+
+api:
+  # 30s caused a reboot loop whenever Home Assistant was unreachable
+  reboot_timeout: 15min
+        
+ota:
+  - platform: esphome
+
+wifi:
+  ap:
+    ssid: ${fssid}
+
+captive_portal:
+
+web_server:
+  version: 3
+  
+# ============================================
+# TEXT SENSORS
+# ============================================
+
+text_sensor:
+  - platform: uptime
+    name: "Laufzeit"
+    id: uptime_sensor
+    icon: "mdi:clipboard-text-clock-outline"
+    entity_category: diagnostic    
+    format:
+      separator: " "
+      expand: true  
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP Addresse"
+      icon: "mdi:ip-network-outline"      
+      entity_category: diagnostic
+    ssid:
+      name: "WLAN SSID"
+      icon: "mdi:wifi-settings"
+      entity_category: diagnostic
+    mac_address:
+      name: "MAC Addresse"
+      entity_category: diagnostic
+      icon: "mdi:wifi-settings"
+      
+  - platform: version
+    name: "ESP-Home Version"
+    entity_category: diagnostic
+    hide_hash: true
+    hide_timestamp: true
+
+# ============================================
+# BUTTONS
+# ============================================
+
+button:
+  - platform: restart
+    name: "Neustart"
+    id: restart_button
+    icon: "mdi:restart"
+    entity_category: diagnostic
+  - platform: factory_reset
+    name: "Factory Reset"
+    id: factory_reset_target
+    disabled_by_default: true
+    internal: true
+
+output:
+  - platform: gpio
+    id: relay_led_output
+    pin:
+      number: P11
+      inverted: true
+
+sensor:
+  - platform: internal_temperature
+    name: Interne Temperatur
+    entity_category: diagnostic
+
+  - platform: hlw8012
+    model: BL0937
+    sel_pin:
+      number: P1
+      inverted: true
+    cf_pin:
+      number: P6
+      inverted: true
+    cf1_pin:
+      number: P8
+      inverted: true
+    current_resistor: ${current_resistor}
+    voltage_divider: ${voltage_divider}
+    current:
+      name: Current
+      id: plug_current
+      unit_of_measurement: A
+      accuracy_decimals: 3
+      filters:
+        - multiply: 0.450158
+    voltage:
+      name: Voltage
+      id: plug_voltage
+      unit_of_measurement: V
+      accuracy_decimals: 1
+    power:
+      name: Power
+      id: plug_power
+      unit_of_measurement: W
+      accuracy_decimals: 1
+    energy:
+      name: Energy
+      id: plug_energy
+      unit_of_measurement: kWh
+      accuracy_decimals: 3
+      filters:
+        - multiply: 0.001
+    update_interval: 2s
+    change_mode_every: 2
+  # ============================================
+  # SYSTEM MONITORING
+  # ============================================
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    icon: "mdi:signal-variant"
+    update_interval: 60s
+    entity_category: diagnostic
+    
+switch:
+  - platform: gpio
+    name: "None"
+    id: relay_1
+    pin:
+      number: P24
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - output.turn_on: relay_led_output
+    on_turn_off:
+      - output.turn_off: relay_led_output
+
+binary_sensor:
+  - platform: gpio
+    name: ${friendly_name} Button
+    id: button_1
+    internal: true
+    pin:
+      number: P26
+      inverted: true
+      mode: INPUT_PULLUP
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_1
+    on_click:
+      - min_length: 8s
+        max_length: 15s
+        then:
+          - logger.log: Button für 8s bis 15 Sekunden gedrückt. Starte Factory Reset...
+          - button.press: factory_reset_target
+            
+  - platform: gpio
+    pin:
+      number: P9  # Ersetze die 0 durch deine tatsächliche GPIO-Pinnummer
+      mode: INPUT # Deaktiviert interne Pull-Up- und Pull-Down-Widerstände
+    name: "Digitaler Eingang Kanal 0"
+    internal: true
